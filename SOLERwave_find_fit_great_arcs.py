@@ -8,11 +8,16 @@ from scipy.signal import find_peaks
 import time as tm
 
 
-def pixel_to_great_segments(coord_of_flare,m_0):
+def pixel_to_great_segments(coord_of_flare,
+                            m_0,
+                            r_sun_pixel,
+                            flat_field = False):
     ''' Assigns an azimuthal and radial angle to each pixel of a map, starting from an origin
 
     :param coord_of_flare:  SkyCoord object, center of the flare with coord_frame of base map
     :param m_0:             map object with wcs, defines the wcs of the calculation; normally first map in the sequence to investigate
+    :paraM r_sun_pixel      float, radius of the sun in pixel
+    :param flat_field:      bool, switches between flat field at sun distance and following the sun curvature
     :return:
         pppixel_vectors_xyz: 3d np.array, carthesian coordinates of each pixel in [xyz,pixel_i,pixel_j] == [xyz,pixel_y,pixel_x]
         aangles_along_arc:   2d np.array, angles of concetric circles around the flare for each pixel
@@ -25,57 +30,77 @@ def pixel_to_great_segments(coord_of_flare,m_0):
     coords,aangles_along_arc,ttheta = pixel_to_great_segments(Flare_coordinates,m_seq[0])
     ###########################################
     '''
+    import sunpy.sun.constants
 
     py,px = m_0.data.shape #Note: This line was added in the submit 2024.11.11, older programms might require adaptiations
     px_range = np.arange(px)
     py_range = np.arange(py)
 
+    if not(flat_field):
+        ########## Handle inputs for only
 
-    ########## Handle inputs for only
+        start = coord_of_flare.transform_to(Heliocentric)
 
-    start = coord_of_flare.transform_to(Heliocentric)
+        distance_unit = u.m #start.cartesian.xyz.unit
 
-    distance_unit = u.m #start.cartesian.xyz.unit
+        center = SkyCoord(0 * distance_unit,
+                          0 * distance_unit,
+                          0 * distance_unit,
+                          obstime=start.obstime,
+                          observer=start.observer,
+                          frame=Heliocentric)
 
-    center = SkyCoord(0 * distance_unit,
-                      0 * distance_unit,
-                      0 * distance_unit,
-                      obstime=start.obstime,
-                      observer=start.observer,
-                      frame=Heliocentric)
+        start_cartesian = start.cartesian.xyz.to(distance_unit).value
+        # end_cartesian = end.cartesian.xyz.to(start.distance_unit).value
+        center_cartesian = center.cartesian.xyz.to(distance_unit).value
 
-    start_cartesian = start.cartesian.xyz.to(distance_unit).value
-    # end_cartesian = end.cartesian.xyz.to(start.distance_unit).value
-    center_cartesian = center.cartesian.xyz.to(distance_unit).value
+        v1 = start_cartesian - center_cartesian
 
-    v1 = start_cartesian - center_cartesian
+        r_sun = np.linalg.norm(v1)
 
-    r_sun = np.linalg.norm(v1)
+        # Defines the second Vector to point to the north pole
+        # Form Heliocentric coordinates:
+        # The Y-axis is aligned with the component of the vector to the Sun’s north pole that is perpendicular to the Z-axis.
+        v2 = np.array([0, r_sun, 0])
 
-    # Defines the second Vector to point to the north pole
-    # Form Heliocentric coordinates:
-    # The Y-axis is aligned with the component of the vector to the Sun’s north pole that is perpendicular to the Z-axis.
-    v2 = np.array([0, r_sun, 0])
+        #Vector in the plane of v1,v2 perp to v1
+        v3 = np.cross(np.cross(v1, v2), v1)
+        v3 = r_sun * v3 / np.linalg.norm(v3)
 
-    #Vector in the plane of v1,v2 perp to v1
-    v3 = np.cross(np.cross(v1, v2), v1)
-    v3 = r_sun * v3 / np.linalg.norm(v3)
-
-    #Vector pero to v1 and perp to v3
-    v4 = np.cross(v1, v3) / r_sun
-
-
-    ppx, ppy = np.meshgrid(px_range, py_range)
-
-    ppixel_vectors = m_0.wcs.array_index_to_world(ppy,ppx)      #From astropy doc: (i, j) order, where for an image i is the row and j is the column
-    ppixel_vectors = ppixel_vectors.transform_to(Heliocentric)
-
-    pppixel_vectors_xyz = ppixel_vectors.cartesian.xyz.value
+        #Vector pero to v1 and perp to v3
+        v4 = np.cross(v1, v3) / r_sun
 
 
-    aangles_along_arc = np.arctan2(np.linalg.norm(np.cross(v1, pppixel_vectors_xyz, axisb=0,axisc=0),axis=0),np.einsum('i,ijk->jk',v1, pppixel_vectors_xyz))
+        ppx, ppy = np.meshgrid(px_range, py_range)
 
-    ttheta = np.arctan2( np.einsum('i,ijk->jk',v4, pppixel_vectors_xyz),np.einsum('i,ijk->jk',v3, pppixel_vectors_xyz))
+        ppixel_vectors = m_0.wcs.array_index_to_world(ppy,ppx)      #From astropy doc: (i, j) order, where for an image i is the row and j is the column
+        ppixel_vectors = ppixel_vectors.transform_to(Heliocentric)
+
+        pppixel_vectors_xyz = ppixel_vectors.cartesian.xyz.value
+
+
+        aangles_along_arc = np.arctan2(np.linalg.norm(np.cross(v1, pppixel_vectors_xyz, axisb=0,axisc=0),axis=0),np.einsum('i,ijk->jk',v1, pppixel_vectors_xyz))
+
+        ttheta = np.arctan2( np.einsum('i,ijk->jk',v4, pppixel_vectors_xyz),np.einsum('i,ijk->jk',v3, pppixel_vectors_xyz))
+
+    else:
+        ############################
+        # Flat field calculation
+        ###########################
+        r_sun = sunpy.sun.constants.equatorial_radius.to('Mm')  # Todo: Solar Radius
+
+        l_pixel = r_sun /r_sun_pixel
+
+        x_flare,y_flare = m_0.wcs.world_to_pixel(coord_of_flare)
+        # Find the pixel angles
+        x_pixel, y_pixel = np.meshgrid(px_range - x_flare,
+                                       py_range - y_flare)
+
+        ttheta = np.arctan2(y_pixel,x_pixel)-np.pi/2#*180/np.pi
+        ppixel_distance = np.sqrt(x_pixel**2+y_pixel**2)
+
+        aangles_along_arc = ppixel_distance*l_pixel.to_value('Mm')
+        pppixel_vectors_xyz = None
 
     return pppixel_vectors_xyz,aangles_along_arc,ttheta
 
@@ -89,14 +114,15 @@ def find_segments_from_list(theta_range, ttheta, angles_along_arc_range, aangles
     :param m_data_list:      list of 2d np.array, maps to be investigated [time][py,px]
     :return:
         intensity_mean  3d np.array, mean of the intensity of each segment [angles_along_arc, theta, time]
+        intensity_median_staggered  3d np.array, median of the intensity of each segment [angles_along_arc, theta, time]
         intensity_var   3d np.array, variance of the intensity of each segment [angles_along_arc, theta, time]
         pixel_per_segment 3d np.array, pixel per segment (same for all timesteps) [angles_along_arc, theta, time]
         mask_3          2d np.array, same size as ppx/ppy, mask of the different segments, numeration starting with 1, than following arcs, than theta
 
     ###########################################
-    Example how to use this function:
+    Example how to use this function (Note, not all required inputs are listed)
 
-    map_data_list,m_base,time,m_seq_base = load_preprocessed_fits(path =path,LVL_0_directory = LVL_0_directory)
+    map_data_list,m_base,time,m_seq_base,... = load_preprocessed_fits(path =path,LVL_0_directory = LVL_0_directory,...)
 
     coords,aangles_along_arc,ttheta = pixel_to_great_segments(...)
     intensity_mean,intensity_var,mask_3 = find_segments(theta_range,ttheta,angles_along_arc_range,aangles_along_arc,m_data_list)
@@ -120,10 +146,10 @@ def find_segments_from_list(theta_range, ttheta, angles_along_arc_range, aangles
 
     mask_3 = np.zeros_like(ttheta)
 
-    intensity_mean = np.zeros((len(angles_along_arc_range) - 1, len(theta_range) - 1, len(m_data_list)))
-    intensity_var = np.zeros((len(angles_along_arc_range) - 1, len(theta_range) - 1, len(m_data_list)))
-    pixel_per_segment = np.zeros((len(angles_along_arc_range) - 1, len(theta_range) - 1, len(m_data_list)))
-    intensity_median = np.zeros((len(angles_along_arc_range) - 1, len(theta_range) - 1, len(m_data_list)))
+    intensity_mean = np.zeros((len(angles_along_arc_range) - 1, len(theta_range) - 1, len(m_data_list))) *np.nan
+    intensity_var = np.zeros((len(angles_along_arc_range) - 1, len(theta_range) - 1, len(m_data_list)))  *np.nan
+    pixel_per_segment = np.zeros((len(angles_along_arc_range) - 1, len(theta_range) - 1, len(m_data_list))) *np.nan
+    intensity_median = np.zeros((len(angles_along_arc_range) - 1, len(theta_range) - 1, len(m_data_list)))  *np.nan
 
     # Shifting all Theta Values to positive values
     # Segment bound assures the change in index is at a boundary
@@ -162,7 +188,7 @@ def for_loop_for_list(theta_range,ttheta,angles_along_arc_range,aangles_along_ar
             #data_segement = [[1] for _ in range(m_data.shape[2])]
             data_mean = np.zeros(time_sequ_len)
             data_mean_square = np.zeros(time_sequ_len)
-            data_segment_count = 0#np.zeros(m_data.shape[2])
+            data_segment_count = np.zeros(time_sequ_len,dtype=np.int32)
             data_median = np.zeros((time_sequ_len,100000))
 
             #test  = np.where(angles_along_arc_range[i] < aangles_along_arc < angles_along_arc_range[i + 1],True,False)
@@ -172,7 +198,7 @@ def for_loop_for_list(theta_range,ttheta,angles_along_arc_range,aangles_along_ar
             for k in range(k_range):
                 for l in range(l_range):
                     #mask[k, l] =
-                    if bool((angles_along_arc_range[i] < aangles_along_arc[k, l] < angles_along_arc_range[i + 1]) & (theta_range[j] < ttheta[k, l] < theta_range[j + 1])):  # np.bool_(mask_i[:,:,i])
+                    if bool((angles_along_arc_range[i] <= aangles_along_arc[k, l] < angles_along_arc_range[i + 1]) & (theta_range[j] <= ttheta[k, l] < theta_range[j + 1])):  # np.bool_(mask_i[:,:,i])
                         px = ppx[k,l]
                         py = ppy[k,l]
 
@@ -180,27 +206,37 @@ def for_loop_for_list(theta_range,ttheta,angles_along_arc_range,aangles_along_ar
                         for index in prange(time_sequ_len):
                             map_data_point = m_data_list[index][py,px]
 
-                            data_mean[index] += map_data_point
-                            data_mean_square[index] += map_data_point**2
-                            data_median[index,data_segment_count] = map_data_point
+                            if ~np.isnan(map_data_point):
+                                data_mean[index] += map_data_point
+                                data_mean_square[index] += map_data_point**2
+                                data_median[index,data_segment_count[index]] = map_data_point
 
-                        data_segment_count +=1
+                                data_segment_count[index] +=1
 
                         mask_3[k,l] = j*(angles_along_arc_range.shape[0]-1) + i + 1
 
 
             for index in prange(time_sequ_len):
-                intensity_mean[i, j, index] = data_mean[index]/data_segment_count
-                intensity_var[i, j, index] = data_mean_square[index]/data_segment_count-(data_mean[index]/data_segment_count)**2
-                pixel_per_segment[i, j,index] = data_segment_count
+                # Checks if there was any not nan value in the
+                if data_segment_count[index] != 0:
+                    intensity_mean[i, j, index] = data_mean[index]/data_segment_count[index]
+                    intensity_var[i, j, index] = data_mean_square[index]/data_segment_count[index]-(data_mean[index]/data_segment_count[index])**2
+                    pixel_per_segment[i, j,index] = data_segment_count[index]
 
-                # Checking for nan as numb median tends to operate like nanmedian, even though not called in this way
-                if np.any(np.isnan(data_median[index,:data_segment_count])):
-                    intensity_median[i, j, index] = np.nan
-                else:
-                    intensity_median[i,j,index] = np.median(data_median[index,:data_segment_count])
+                    intensity_median[i,j,index] = np.median(data_median[index,:data_segment_count[index]])
 
-def find_segments_from_list_staggered(theta_range,ttheta,angles_along_arc_range,aangles_along_arc,map_data_list,r_sun_ref,m_ref_height,times_staggered = 4,calculate_uncertainty = True,parameter_dict ={}):
+def find_segments_from_list_staggered(theta_range,
+                                      ttheta,
+                                      angles_along_arc_range,
+                                      aangles_along_arc,
+                                      map_data_list,
+                                      r_sun_ref,
+                                      r_sun_pixel,
+                                      m_ref_height,
+                                      times_staggered = 4,
+                                      calculate_uncertainty = True,
+                                      flat_field = False,
+                                      parameter_dict ={}):
     """ Wrapper to call the find_segments_from_list function multiple times for a staggered output for the segments
     between the theta_range and angles_along_arc_range. Staggering is done equidistant along the angles_along_arc
     direction.
@@ -211,10 +247,14 @@ def find_segments_from_list_staggered(theta_range,ttheta,angles_along_arc_range,
     :param aangles_along_arc:      2d np.array, angles of concentric circles around the flare for each pixel, return of pixel_to_great_segments
     :param m_data_list:            list of 2d np.array, maps to be investigated [time][py,px]
     :param r_sun_ref:              astropy unit float (in meter), reference sphere the calculations take place on
+    :param r_sun_pixel:            float, radius of the sun in pixel
     :param times_staggered:        int, number of steps between two angles in angle_along_arc_range including the first
+    :param calculate_uncertainty:   bool, activate tracking of the segment uncertainty depending on segment position
+    :param flat_field:              bool, switches between flat field at sun distance and following the sun curvature
     :param parameter_dict: dict, filled with the parameters, in and output of SOLERwave functions
     :return:
         intensity_mean_staggered  3d np.array, mean of the intensity of each segment [angles_along_arc, theta, time]
+        intensity_median_staggered  3d np.array, median of the intensity of each segment [angles_along_arc, theta, time]
         intensity_var_staggered   3d np.array, variance of the intensity of each segment [angles_along_arc, theta, time]
         distance_staggered        1d np.array, distance values in u.meter
         base_mask                 2d np.array, same size as ppx/ppy, mask of the different segments of the non-staggered
@@ -223,6 +263,9 @@ def find_segments_from_list_staggered(theta_range,ttheta,angles_along_arc_range,
                                                same value for all time steps
         parameter_dict: dict, filled with the parameters, in and output of SOLERwave functions
     """
+
+    assert aangles_along_arc.shape == ttheta.shape
+    assert aangles_along_arc.shape == map_data_list[0].shape
 
     def f_median(mat, **kwargs):
         '''
@@ -241,7 +284,13 @@ def find_segments_from_list_staggered(theta_range,ttheta,angles_along_arc_range,
         :param kwargs:  unused
         :return:        1d np.array, max pixel distance to center in segment [time]
         '''
-        return np.expand_dims(np.max(mat,axis=0),1)
+        if mat.size != 0:
+            a = np.expand_dims(np.nanmax(mat, axis=0), 1)
+        else:
+            #print('asdf')
+            a = np.nan
+
+        return a
 
 
     import sunpy
@@ -256,15 +305,19 @@ def find_segments_from_list_staggered(theta_range,ttheta,angles_along_arc_range,
 
     ts = times_staggered
 
-    distance = (angles_along_arc_range[:-1]+np.diff(angles_along_arc_range)/2) * r_sun_ref
-
 
     ################### Staggered Plot (with 3 steps between each angle along arch ) ##############################
     #'''
     ##########################################################################################
+    diff_angles = (angles_along_arc_range[1] - angles_along_arc_range[0]) / ts
 
-    diff_angles = (angles_along_arc_range[1]-angles_along_arc_range[0])/ts
-    diff_distance = (distance[1]-distance[0])/ts
+    if flat_field:
+        distance = (angles_along_arc_range[:-1] + np.diff(angles_along_arc_range) / 2)*1e6*u.m
+        diff_distance = diff_angles * 1e6*u.m
+    else:
+        distance = (angles_along_arc_range[:-1]+np.diff(angles_along_arc_range)/2) * r_sun_ref
+        diff_distance = diff_angles * r_sun_ref
+
 
     intensity_mean_staggered = np.zeros((intensity_mean.shape[0]*ts,intensity_mean.shape[1],intensity_mean.shape[2]))
     intensity_mean_staggered[::ts,:,:] = intensity_mean[:,:,:]
@@ -285,12 +338,12 @@ def find_segments_from_list_staggered(theta_range,ttheta,angles_along_arc_range,
     #
     ###############################################
     #'''
-    if calculate_uncertainty:
+    if calculate_uncertainty and (not flat_field):
         # Coordinates Flares
         Flare_coordinates = SkyCoord(Tx = 0* u.arcsec, Ty = 0* u.arcsec,frame=m_ref_height.coordinate_frame)
 
         # Find the pixel angles
-        _, aaa_central, ttheta_central = pixel_to_great_segments(Flare_coordinates, m_ref_height)
+        _, aaa_central, ttheta_central = pixel_to_great_segments(Flare_coordinates, m_ref_height,r_sun_pixel)
 
 
         #CRPIX1  [pixel] CRPIX1: location of sun center in CCD x
@@ -303,14 +356,6 @@ def find_segments_from_list_staggered(theta_range,ttheta,angles_along_arc_range,
         max_pixel_distance = evaluate_on_mask_from_list(base_mask, f_max_pixel_distance, [x_pixel_center], theta_range, angles_along_arc_range,
                                    base_pixel_per_segment, func_dimensions=1)
 
-
-
-        if m_ref_height.fits_header.get('TELESCOP') == 'SDO/AIA':
-            r_sun_pixel = m_ref_height.fits_header.get('R_SUN')/(4096/m_ref_height.data.shape[0])
-        else:
-            # TODO: Implement for other insturments, #Corrects for Binning, but should be correct in R_sun already
-            assert False,'Instrument is not jet implemented in the uncertainty calculations of find_segment_from_list_staggered'
-
         alpha = np.arccos(max_pixel_distance/r_sun_pixel)
         alpha_dash = np.arccos((max_pixel_distance+ 1/np.sqrt(2))/r_sun_pixel)
 
@@ -318,11 +363,13 @@ def find_segments_from_list_staggered(theta_range,ttheta,angles_along_arc_range,
 
         delta_pixel_distance_staggered_Mm = np.zeros_like(intensity_mean_staggered)
         delta_pixel_distance_staggered_Mm[::ts] = delta_pixel_distance[:,:,:,0]
-    else:
+    elif flat_field:
         delta_pixel_distance_staggered_Mm = None#np.zeros_like(intensity_mean_staggered)*np.nan
-
-
-
+        now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
+        print(now + ' find_segments_from_list : Warning: As flat_field is enabled,'
+                    ' no segment dependent uncerainty is calculated (i.e. delta_pixel_distance_staggered_Mm = None)')
+    else:
+        delta_pixel_distance_staggered_Mm = None
 
     for start_index in range(1,ts):
         nr_of_segments = (len(angles_along_arc_range)-1) * (len(theta_range)-1)
@@ -338,7 +385,7 @@ def find_segments_from_list_staggered(theta_range,ttheta,angles_along_arc_range,
 
 
 
-        if calculate_uncertainty:
+        if calculate_uncertainty and (not flat_field):
             max_pixel_distance = evaluate_on_mask_from_list(mask_3_stagg, f_max_pixel_distance, [x_pixel_center],
                                                             theta_range,
                                                             angles_along_arc_range + start_index * diff_angles,
@@ -361,11 +408,21 @@ def find_segments_from_list_staggered(theta_range,ttheta,angles_along_arc_range,
 
     parameter_dict['general'] = ' '
     parameter_dict['general: reference radius sun (in Mm)'] = r_sun_ref.to_value('Mm')
-    parameter_dict['general: difference to nominal solar radius (695.7 Mm) (in Mm)'] = r_sun_ref.to_value('Mm')-695700000
+    parameter_dict['general: difference to nominal solar radius (695.7 Mm) (in Mm)'] = r_sun_ref.to_value('Mm')-695.7
     parameter_dict['general: aaa distance between segments unstaggered (in Mm)'] = round(np.diff(distance)[0].to_value(u.Mm),2)
-    parameter_dict['general: aaa distance between segments unstaggered (in Degree)'] = round(np.diff(angles_along_arc_range)[0] *180/np.pi,2)
-    parameter_dict['general: aaa max range unstaggered (in Degree)'] = round(angles_along_arc_range[-1] *180/np.pi,2)
-    parameter_dict['general: aaa min range unstaggered (in Degree)'] = round(angles_along_arc_range[0] * 180 / np.pi,2)
+    if flat_field:
+        parameter_dict['general: aaa distance between segments unstaggered (in Degree)'] = 'n.A. Flat field calculation'
+        parameter_dict['general: aaa max range unstaggered (in Degree)'] = 'n.A. Flat field calculation'
+        parameter_dict['general: aaa min range unstaggered (in Degree)'] = 'n.A. Flat field calculation'
+    else:
+        parameter_dict['general: aaa distance between segments unstaggered (in Degree)'] = round(
+        np.diff(angles_along_arc_range)[0] * 180 / np.pi, 2)
+        parameter_dict['general: aaa max range unstaggered (in Degree)'] = round(
+            angles_along_arc_range[-1] * 180 / np.pi, 2)
+        parameter_dict['general: aaa min range unstaggered (in Degree)'] = round(
+            angles_along_arc_range[0] * 180 / np.pi, 2)
+
+
     parameter_dict['general: aaa max range unstaggered (in Mm)'] = round(distance[-1].to_value(u.Mm),2)
     parameter_dict['general: aaa min range unstaggered (in Mm)'] = round(distance[0].to_value(u.Mm),2)
     parameter_dict['diagnostic: Maximum Nr of pixel per Segment'] = np.max(max_pixel_per_segment)
@@ -442,7 +499,11 @@ def evaluate_on_mask_from_list(mask_3_full,function,m_data_list,theta_range,angl
 
     return result_mat
 
-def find_coord_from_angles(coord_of_flare, theta_mat, arc_angles_mat):
+def find_coord_from_angles(coord_of_flare,
+                           theta_mat,
+                           arc_angles_mat,
+                           flat_field = False,
+                           mask_overlimb = True):
     ''' Finds the corresponding x,y,z coordinates of theta and arc angles given in a heliocentric view with respect to
     the coord_of_flare Skycoord object. Takes 2d matrices as input to allow for the calculation of multiple points in
     one function call. For use in plot functions, see the example below.
@@ -450,6 +511,7 @@ def find_coord_from_angles(coord_of_flare, theta_mat, arc_angles_mat):
     :param coord_of_flare:  Skycoord Object of the Flare origin at the intended height
     :param theta_mat:       1d or 2d np.array; theta values with [theta, aaa]
     :param arc_angles_mat:  1d or 2d np.array; aaa   values with [theta, aaa]
+    :param flat_field:      bool, switches between flat field at sun distance and following the sun curvature
     :return:
         2d/3d np.array Matrix with values for vectors [xyu,theta,aaa]
 
@@ -470,10 +532,9 @@ def find_coord_from_angles(coord_of_flare, theta_mat, arc_angles_mat):
     import numpy as np
 
     theta_dims = len(theta_mat.shape)
+    distance_unit = u.m  # Define meter as the unite that is used #start.cartesian.xyz.unit
 
     start = coord_of_flare.transform_to(Heliocentric)
-
-    distance_unit = u.m # Define meter as the unite that is used #start.cartesian.xyz.unit
 
     center = SkyCoord(0 * distance_unit,
                       0 * distance_unit,
@@ -483,56 +544,76 @@ def find_coord_from_angles(coord_of_flare, theta_mat, arc_angles_mat):
                       frame=Heliocentric)
 
     start_cartesian = start.cartesian.xyz.to(distance_unit).value
-    #end_cartesian = end.cartesian.xyz.to(start.distance_unit).value
-    center_cartesian = center.cartesian.xyz.to(distance_unit).value
 
-    v1 = start_cartesian - center_cartesian
-    r_sun = np.linalg.norm(v1)
+    if not(flat_field):
 
-    # Defines the second Vector to point to the north pole
-    # Form Heliocentric coordinates:
-    # The Y-axis is aligned with the component of the vector to the Sun’s north pole that is perpendicular to the Z-axis.
-    v2 = np.array([0,r_sun,0])
+        #end_cartesian = end.cartesian.xyz.to(start.distance_unit).value
+        center_cartesian = center.cartesian.xyz.to(distance_unit).value
 
-    # Initial v3 vektor pointing north and perpendicular to v1
-    v3 = np.cross(np.cross(v1, v2), v1)
-    v3 = r_sun * v3 / np.linalg.norm(v3)
+        v1 = start_cartesian - center_cartesian
+        r_sun = np.linalg.norm(v1)
 
-    #https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula
+        # Defines the second Vector to point to the north pole
+        # Form Heliocentric coordinates:
+        # The Y-axis is aligned with the component of the vector to the Sun’s north pole that is perpendicular to the Z-axis.
+        v2 = np.array([0,r_sun,0])
 
-    # Temporary Vector needed for the rotating vector
-    v4 = np.cross(v1,v3)/r_sun
+        # Initial v3 vektor pointing north and perpendicular to v1
+        v3 = np.cross(np.cross(v1, v2), v1)
+        v3 = r_sun * v3 / np.linalg.norm(v3)
 
-    # Using einsum to creat the matrices
-    # Note on the notation: the number of the first letter indicates the dimensions
+        #https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula
 
-    if theta_dims == 2:
-        vvv1 = np.einsum('i,jk -> ijk', v1, np.ones_like(theta_mat))
-        vvv3 = np.einsum('i,jk -> ijk', v3, np.ones_like(theta_mat))
-        vvv4 = np.einsum('i,jk -> ijk', v4, np.ones_like(theta_mat))
-        tttheta = np.einsum('i,jk -> ijk',  np.ones_like(v3),theta_mat)
-        aaarcangles = np.einsum('i,jk -> ijk',  np.ones_like(v3), arc_angles_mat)
-    if theta_dims == 1:
-        vvv1 = np.einsum('i,j -> ij', v1, np.ones_like(theta_mat))
-        vvv3 = np.einsum('i,j -> ij', v3, np.ones_like(theta_mat))
-        vvv4 = np.einsum('i,j -> ij', v4, np.ones_like(theta_mat))
-        tttheta = np.einsum('i,j -> ij',  np.ones_like(v3),theta_mat)
-        aaarcangles = np.einsum('i,j -> ij',  np.ones_like(v3), arc_angles_mat)
+        # Temporary Vector needed for the rotating vector
+        v4 = np.cross(v1,v3)/r_sun
 
-    vvv_rot = vvv3*np.cos(tttheta) + vvv4 * np.sin(tttheta) #+ v1*np.dot(v1,v3) / r_sun**2 * (1-np.cos(theta)) #The last part is redundant as <v1|v3> = 0
+        # Using einsum to creat the matrices
+        # Note on the notation: the number of the first letter indicates the dimensions
 
-    gggreat_arc_points_carthesian = vvv1 *np.cos(aaarcangles) + vvv_rot * np.sin(aaarcangles)
+        if theta_dims == 2:
+            vvv1 = np.einsum('i,jk -> ijk', v1, np.ones_like(theta_mat))
+            vvv3 = np.einsum('i,jk -> ijk', v3, np.ones_like(theta_mat))
+            vvv4 = np.einsum('i,jk -> ijk', v4, np.ones_like(theta_mat))
+            tttheta = np.einsum('i,jk -> ijk',  np.ones_like(v3),theta_mat)
+            aaarcangles = np.einsum('i,jk -> ijk',  np.ones_like(v3), arc_angles_mat)
+        if theta_dims == 1:
+            vvv1 = np.einsum('i,j -> ij', v1, np.ones_like(theta_mat))
+            vvv3 = np.einsum('i,j -> ij', v3, np.ones_like(theta_mat))
+            vvv4 = np.einsum('i,j -> ij', v4, np.ones_like(theta_mat))
+            tttheta = np.einsum('i,j -> ij',  np.ones_like(v3),theta_mat)
+            aaarcangles = np.einsum('i,j -> ij',  np.ones_like(v3), arc_angles_mat)
 
-    if theta_dims == 2:
-        mask = gggreat_arc_points_carthesian[2,:,:] < 0
-    if theta_dims == 1:
-        mask = gggreat_arc_points_carthesian[2, :] < 0
-    gggreat_arc_points_carthesian[0,mask] = np.nan
-    gggreat_arc_points_carthesian[1, mask] = np.nan
-    gggreat_arc_points_carthesian[2, mask] = np.nan
+        vvv_rot = vvv3*np.cos(tttheta) + vvv4 * np.sin(tttheta) #+ v1*np.dot(v1,v3) / r_sun**2 * (1-np.cos(theta)) #The last part is redundant as <v1|v3> = 0
+
+        gggreat_arc_points_carthesian = vvv1 *np.cos(aaarcangles) + vvv_rot * np.sin(aaarcangles)
+
+        # Added an "mask overlimb" keyword to the find_coord_from_angles function. If false,
+        # vectors with negative z values (i.e. over the limb) are not replaced with nan.
+        if mask_overlimb:
+            if theta_dims == 2:
+                mask = gggreat_arc_points_carthesian[2,:,:] < 0
+            if theta_dims == 1:
+                mask = gggreat_arc_points_carthesian[2, :] < 0
+            gggreat_arc_points_carthesian[0,mask] = np.nan
+            gggreat_arc_points_carthesian[1, mask] = np.nan
+            gggreat_arc_points_carthesian[2, mask] = np.nan
+
+        gggreat_arc_points_carthesian = gggreat_arc_points_carthesian * distance_unit
+    else:
+        flare_pos_xyz_Mm = coord_of_flare.transform_to(Heliocentric).cartesian.xyz.to_value('Mm')
+
+        # Adds to the flare position in cartesian coordinates the arc angles (arc angles in Mm)
+        x_distance = np.cos(theta_mat+np.pi/2)*arc_angles_mat +flare_pos_xyz_Mm[0]
+        y_distance = np.sin(theta_mat + np.pi / 2) * arc_angles_mat +flare_pos_xyz_Mm[1]
+
+        z_distance = np.zeros_like(x_distance)
+
+
+
+        gggreat_arc_points_carthesian = np.stack((x_distance,y_distance,z_distance),axis = 0) *u.Mm
+
 
     return gggreat_arc_points_carthesian
-
 
 
 
@@ -545,11 +626,11 @@ def find_coord_from_angles(coord_of_flare, theta_mat, arc_angles_mat):
 def distance_uncertainties(distance,
                            times_staggered,
                            r_sun_ref,
-                           m_ref_height,
+                           r_sun_pixel,
                            intensity_median,
                            intensity_var,
-                           delta_distance_pixel = None
-                           ):
+                           delta_distance_pixel = None,
+                           flat_field = False):
     """
     Calculated the upper and lower uncertainty in distance including "interpolated amplitude uncertainty" and
     "pixel error" for the front and tracing edge.
@@ -558,7 +639,6 @@ def distance_uncertainties(distance,
     :param distance:        1d np.array * distance_unit, distance of the staggered segments
     :param times_staggered: 1d list, times of the observation
     :param r_sun_ref:       float * distance_unit, reference radius for the calculations
-    :param m_ref_height:    sunpy.map, base map with keywords according to the reference radius
     :param intensity_median: see find_segments_from_list_staggered
     :param intensity_var:   see find_segments_from_list_staggered
     :param delta_distance_pixel: 1d np.array or None,
@@ -568,41 +648,46 @@ def distance_uncertainties(distance,
         delta_distance:     4d np.array, upper/lower interpolated amplitude uncertainty + pixel error in (Mm)
                                          [upper/lower,angles_along_arc, theta, time]
         segment_pixel_uncertainty: 3d np.array, pixel + segment error for segment [angles_along_arc, theta, time]
+        delta_d_segment_size:      float, segment size error to be added to delta_distance in the peak finder
+        segment_length:            float, length of a segment in Mm
     """
 
     ##########################################
     # Segment Uncertainty
     ##########################################
-    # Todo: Include nan Handeling
 
     distance_MM = distance.to_value('Mm')
     diff_distance_MM = (distance_MM[1] - distance_MM[0])
 
+    # Segment length
+    segment_length = diff_distance_MM * times_staggered
+
     # Segment distance Error
-    delta_d_segment_size = diff_distance_MM*(times_staggered/2+1)
+    delta_d_segment_size = segment_length/2+diff_distance_MM
+
+
 
     ##########################
     #Pixel error
     ##########################
     if delta_distance_pixel is None:
         r_sun = r_sun_ref.to_value(u.m)
+        l_pixel = r_sun / r_sun_pixel
 
-        if m_ref_height.fits_header.get('TELESCOP') == 'SDO/AIA':
-            l_pixel = r_sun/(m_ref_height.fits_header['R_Sun']/(4096/m_ref_height.data.shape[0]))
+        if flat_field:
+            delta_d_pixel_size = np.sqrt(2)/2*l_pixel*u.m
         else:
-            assert False, 'Instrument is not jet implemented in the uncertainty calculations of distance_uncertainties'
-
         # Calculated for 70° from Center
-        x_min = r_sun*np.sin(np.pi*70/180)
-        x_delta_x_max = r_sun*np.sin(np.pi*70/180) + np.sqrt(2)/2 *l_pixel
+            x_min = r_sun*np.sin(np.pi*70/180)
+            x_delta_x_max = r_sun*np.sin(np.pi*70/180) + np.sqrt(2)/2 *l_pixel
 
-        alpha_pix_err = np.arccos(x_min/r_sun)
-        alpha_dash_pix_err = np.arccos(x_delta_x_max / r_sun)
+            alpha_pix_err = np.arccos(x_min/r_sun)
+            alpha_dash_pix_err = np.arccos(x_delta_x_max / r_sun)
 
-        delta_d_pixel_size= r_sun * (alpha_pix_err - alpha_dash_pix_err)#/2 #
+            delta_d_pixel_size= r_sun * (alpha_pix_err - alpha_dash_pix_err)#/2 #
 
-        delta_d_pixel_size = delta_d_pixel_size*u.m
-        print('pixel size Uncertainty %.2f' %(delta_d_pixel_size.to_value('Mm')))
+            delta_d_pixel_size = delta_d_pixel_size*u.m
+            print('pixel size Uncertainty %.2f' %(delta_d_pixel_size.to_value('Mm')))
 
     ########################
     # Interpolated amplitude uncertainty to distance uncertainty
@@ -640,6 +725,7 @@ def distance_uncertainties(distance,
 
         # Note: The segment uncertainty is added in the Peak_finding_algorithm, as this allows the application
         #        of asymmetric uncertainties depending on front and trailing edge
+        #        i.e. the delta_d_segment_uncertainty is only added to the front facing uncertainty of a front point
         delta_distance[1,:-1,:,:] = delta_right  + delta_d_pixel_size.to_value('Mm') #+ delta_d_segment_size
         delta_distance[0,1:,:,:] = -delta_left  + delta_d_pixel_size.to_value('Mm') #+ delta_d_segment_size
 
@@ -649,15 +735,21 @@ def distance_uncertainties(distance,
 
         # Note: The segment uncertainty is added in the Peak_finding_algorithm, as this allows the application
         #        of asymmetric uncertainties depending on front and trailing edge
+        #        i.e. the delta_d_segment_uncertainty is only added to the front facing uncertainty of a front point
         delta_distance[1,:,:,:] = delta_distance_pixel[:,:,:] #+ delta_d_segment_size
         delta_distance[0,:,:,:] = delta_distance_pixel[:,:,:]  # + delta_d_segment_size
 
         delta_distance[1, :-1, :, :] =delta_right  + delta_distance[1, :-1, :, :]
-        delta_distance[0, 1:, :, :] = - delta_left +delta_distance[0, 1:, :, :]
+        delta_distance[0, 1:, :, :] = - delta_left + delta_distance[0, 1:, :, :]
 
         segment_pixel_uncertainty = delta_d_segment_size + delta_distance_pixel[:,:,:]
 
-    return delta_distance,segment_pixel_uncertainty,delta_d_segment_size
+    # Set delta distance of first point to nan if point is nan
+    delta_distance[0, 0, :, :][np.isnan(intensity_median[0, :, :])] = np.nan
+    # Set delta distance of last point to nan if point is nan
+    delta_distance[1, -1, :, :][np.isnan(intensity_median[-1, :, :])] = np.nan
+
+    return delta_distance,segment_pixel_uncertainty,delta_d_segment_size,segment_length
 
 
 
@@ -667,19 +759,21 @@ def distance_uncertainties(distance,
 #
 #############################################################################################
 
+
+#@njit(parallel=True)
 def peak_finding_algorithm(intensity_mean,
                            intensity_std,
                            theta_range,
                            distance,
                            delta_distance,
                            segment_pixel_uncertainty,
-                           delta_segment,
-                           time,
+                           delta_d_segment_size,
                            max_nr_peaks_const=5,
                            wavefront_cutof=0.5,
                            cutoff_type = 'relative',
                            min_peak_height=1.1,
                            c_closest=0.03,
+                           sectorwarnings_active = True,
                            parameter_dict={}):
     ''' Finds the peaks in the perturbation profiles given by intensty_mean and distance. Uses custom parameters to
     allow fine adjustment
@@ -688,6 +782,10 @@ def peak_finding_algorithm(intensity_mean,
     :param intensity_std:       3d np.array, standard deviation (= sqrt of variance) of the intensity of each segment [angles_along_arc, theta, time]
     :param theta_range:         1d np.array, vector of the segment borders along ttheta direction
     :param distance:            1d np.array, Distance in length units (e.g. [1e6,2e6] * u.m) of astropy.units
+    :param delta_distance:      4d np.array, upper/lower interpolated amplitude uncertainty + pixel error in (Mm)
+                                             [upper/lower,angles_along_arc, theta, time]
+    :param segment_pixel_uncertainty: 3d np.array, pixel + segment error for segment [angles_along_arc, theta, time]
+    :param delta_d_segment_size:      float, segment size error to be added to delta_distance in the peak finder
     :param time:                list with strings, time string of the observation of images
     :param max_nr_peaks_const:  int                 ; upper Limit of peaks searched for
     :param wavefront_cutof:     np.float: [% of peak];  Percent of peak height defining the wavefront/trail
@@ -709,7 +807,6 @@ def peak_finding_algorithm(intensity_mean,
 
     '''
 
-    from sunpy.time import parse_time
     from scipy.optimize import curve_fit
 
     def gaussian(x, A, x0, sigma1):#,sigma2):
@@ -725,14 +822,7 @@ def peak_finding_algorithm(intensity_mean,
         0], "distance needs to have the same length as axis 0 of intensity_mean"
     assert theta_range.shape[0] - 1 == intensity_mean.shape[
         1], "theta_range must be shorter by 1 value than the axis 1 of intensity_mean"
-    assert len(time) == intensity_mean.shape[2], "the time list has to be equally long as axis 2 of intensity_mean"
 
-
-    time_dateobj = np.array(time, dtype='datetime64[ns]')  #For Plotting
-
-    time_sunpyobj = parse_time(time)
-    # Time vector used for fitting operations to avoid unnecessary large numbers
-    t_sunpy_sec = (time_sunpyobj - time_sunpyobj[0]).to_value('sec')
 
     # Matrices Saving the distance along the solar surface from its origin
     d_peak_mat = np.zeros((intensity_mean.shape[1], intensity_mean.shape[2], int(max_nr_peaks_const))) * np.nan
@@ -766,7 +856,10 @@ def peak_finding_algorithm(intensity_mean,
     #############
     # Add Segment Uncertainty
     ##########
-    delta_distance = delta_distance +delta_segment
+    # NOTE: Despite the option to add delta_d_segment_size based on the direction of the uncertainty with respect to
+    #       the wave (i.e. front-phasing uncertainty of front is treated differently as trail-phasing uncertainty of front)
+    #       this is not implemented and the uncertainty is applied symmetrically
+    delta_distance = delta_distance + delta_d_segment_size
     segment_pixel_uncertainty_with_nan = np.copy(segment_pixel_uncertainty)
 
     max_nr_peaks_mat = np.zeros((intensity_mean.shape[1], intensity_mean.shape[2]),
@@ -775,14 +868,14 @@ def peak_finding_algorithm(intensity_mean,
     if cutoff_type.lower() == 'relative':
         if wavefront_cutof > 0.5:
             now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
-            print(now + 'peak_finding_algorithm: Warning: The fit range of the gaussian (FWHM) is larger than the wavefront_cutof')
+            print(now + ' peak_finding_algorithm: Warning: The fit range of the gaussian (FWHM) is larger than the wavefront_cutof')
     elif cutoff_type.lower() == 'absolut':
         if wavefront_cutof < ((min_peak_height-1)*0.5)+1:
             now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
-            print(now + 'peak_finding_algorithm: Warning: The fit range of the gaussian (FWHM) is larger than the wavefront_cutof')
+            print(now + ' peak_finding_algorithm: Warning: The fit range of the gaussian (FWHM) is larger than the wavefront_cutof')
         assert min_peak_height > wavefront_cutof,'the minimum peak height is smaller than the wavefront_cutof'
     else:
-        assert False, 'peak_finding_algorithm: Unknown type for cutoff_type, chose "relative" or "absolut" '
+        assert False, ' peak_finding_algorithm: Unknown type for cutoff_type, chose "relative" or "absolut" '
 
     ##################################################################################
     # Peak Finding Algorithm
@@ -795,9 +888,9 @@ def peak_finding_algorithm(intensity_mean,
         #assert not np.any(np.isnan(intensity_mean[:, j, :])), ("The sector with index j = %.0f contains nan values, "
         #                                                       "likely due to angle_along_arc reaching over the solar "
         #                                                       "horizon" %(j))
-        if np.any(np.isnan(intensity_mean[:, j, :])):
+        if np.any(np.isnan(intensity_mean[:, j, :])) and sectorwarnings_active:
             now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
-            print(now + 'peak_finding_algorithm: Warning: The Sector includes nan values in intensity_mean')
+            print(now + ' peak_finding_algorithm: Warning: The Sector includes nan values in intensity_mean')
 
         distance_MM_with_nan = distance.to_value(u.Mm)
         diff_distance_MM = (distance_MM_with_nan[1] - distance_MM_with_nan[0])
@@ -856,6 +949,9 @@ def peak_finding_algorithm(intensity_mean,
                         d_peak_mat[j, t, i] = distance_MM[peak_arg]
                         peak_mat[j, t, i] = peak
                         delta_peak_mat[j, t, i] = std_int_vector[peak_arg]
+
+                        # Interpolates the segment dependent uncertainty of pixel error and segment error and evaluates
+                        # it on the peak distance d_peak_mat[j, t, i]
                         delta_d_peak_mat[:,j,t,i] = np.interp(d_peak_mat[j, t, i],distance_MM,segment_pixel_uncertainty[:,j,t])
 
                         if cutoff_type.lower() == 'relative':
@@ -961,9 +1057,10 @@ def peak_finding_algorithm(intensity_mean,
                                 front_mat[j, t, i] = mean_int_vector[front_arg]
                             else:
                                 front_arg = len(mean_int_vector)
-                                now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
-                                print(now + ' peak_finding_algorithm: no front found at %.0f° theta ' % (
-                                    theta_angle) + time[t])
+                                if sectorwarnings_active:
+                                    now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
+                                    print(now + ' peak_finding_algorithm: no front found at %.0f° theta ' % (
+                                        theta_angle) + f'and time_index: {t}')
 
                         #####################################
                         # Peak fitting
@@ -1003,8 +1100,10 @@ def peak_finding_algorithm(intensity_mean,
                                                  p0 = [peak_guess-1,mu_guess,sigma_guess],
                                                  bounds=[[0,distance_MM[trail_arg+1],0],
                                                          [peak_guess*2,distance_MM[front_arg-1],10*sigma_guess]],
-                                                 sigma = delta_fit_vector)
-                                                 #absolute_sigma=True) #Todo Include the Jacobian
+                                                 sigma = delta_fit_vector,
+                                                 )
+                                                 #jac='cs') #Did not improve fitting
+                                                 #absolute_sigma=True) #
 
                                 d_fitted_peak_mat[j, t, i] = a[1]
                                 fitted_peak_mat[j, t, i] = a[0] + 1
@@ -1037,26 +1136,9 @@ def peak_finding_algorithm(intensity_mean,
 
                                 delta_fitted_peak_mat[j, t, i] = std_int_vector[peak_arg]
 
-                            '''
-                            mod = GaussianModel()
-
-                            pars = mod.guess(fit_vector-1, x=fit_distance)
-                            pars['sigma'].set(value=distance_MM[front_arg]-distance_MM[trail_arg], vary=True, expr='')
-                            out = mod.fit(fit_vector-1, pars, x=fit_distance)
-
-                            # List methodes: dir(out.params['center'])
-
-                            d_fitted_peak_mat[j, t, i] = out.params['center'].value
-                            fitted_peak_mat[j,t,i] = out.params['amplitude'].value + 1
-                            #print(a[0])
-
-                            delta_d_peak_mat[j, t, i] = out.params['center'].stderr
-                            delta_fitted_peak_mat[j,t,i] = out.params['amplitude'].stderr
-                            '''
-
                         except:
                             now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
-                            print(now + ' peak_finding_algorithm: fitting a peak failed at %.0f° theta ' % (theta_angle) + time[t])
+                            print(now + ' peak_finding_algorithm: fitting a peak failed at %.0f° theta ' % (theta_angle) + f'and time_index: {t}')
 
                             # Possible sources of failure:
                             # - to little data points: for 3 parameters at least 3 independent variables are needed
@@ -1083,15 +1165,24 @@ def peak_finding_algorithm(intensity_mean,
                             boxing_front_arg = np.max(front_args_vec[front_args_vec < peak_arg])
                             boxing_trail_arg = np.min(trail_args_vec[trail_args_vec > peak_arg])
 
-                            h_diff_front = peak - np.min(mean_int_vector[int(boxing_front_arg):peak_arg])
-                            #arg_diff_front = peak_arg - boxing_front_arg - 1
-                            d_diff_front = distance_MM[peak_arg] - distance_MM[
-                                int(boxing_front_arg + 1)]  # The one is to correct for the inclusion of the pillar
+                            #Checks if it makes sense to look for a trail prominence
+                            if int(boxing_front_arg) != 0:
+                                h_diff_front = peak - np.min(mean_int_vector[int(boxing_front_arg):peak_arg])
+                                d_diff_front = distance_MM[peak_arg] - distance_MM[
+                                    int(boxing_front_arg + 1)]  # The one is to correct for the inclusion of the pillar
+                            else:
+                                # The boxing_front_arg is 0, the h_diff_front value is set to large enough
+                                h_diff_front = c_closest+1
 
-                            h_diff_trail = peak - np.min(mean_int_vector[peak_arg:int(boxing_trail_arg)])
-                            #arg_diff_trail = boxing_trail_arg - peak_arg - 1  #
-                            d_diff_trail = distance_MM[int(boxing_trail_arg - 1)] - distance_MM[
-                                peak_arg]  # The one is to correct for the inclusion of the pillar
+                            # Checks if it makes sense to look for a front prominence
+                            if int(boxing_trail_arg) != len(mean_int_vector):
+                                h_diff_trail = peak - np.min(mean_int_vector[peak_arg:int(boxing_trail_arg)])
+                                d_diff_trail = distance_MM[int(boxing_trail_arg - 1)] - distance_MM[
+                                    peak_arg]  # The one is to correct for the inclusion of the pillar
+                            else:
+                                # The boxing_trail_arg is the length of the vector,
+                                # the h_diff_front value is set to large enough
+                                h_diff_trail = c_closest+1
 
                             ############################################################
                             # Implementation of c as a % height * distance parameter
@@ -1113,7 +1204,7 @@ def peak_finding_algorithm(intensity_mean,
 
 
                 if lok_max.shape[0] != 0:
-                    print('More than %.0f peaks found in %.0f° theta at ' % (max_nr_peaks_const, theta_angle) + time[t])
+                    print('More than %.0f peaks found in %.0f° theta at ' % (max_nr_peaks_const, theta_angle) + f'and time_index: {t}')
 
     #############################################
     # Addition of the Segment Error
@@ -1138,18 +1229,21 @@ def peak_finding_algorithm(intensity_mean,
     parameter_dict['peak finding algorithm: max_nr_peaks_const'] = max_nr_peaks_const
     parameter_dict['peak finding algorithm: wavefront_cutof (% of peak height)'] = wavefront_cutof
     parameter_dict['peak finding algorithm: min_peak_height (%)'] = min_peak_height
-    parameter_dict['peak finding algorithm: c_closest (% * mM)'] = c_closest
+    #parameter_dict['peak finding algorithm: c_closest (% * mM)'] = c_closest # Not used
+    parameter_dict['peak finding algorithm: c_closest (%)'] = c_closest
 
     return (d_peak_mat,d_front_mat, d_trail_mat,d_fitted_peak_mat,
             peak_mat,fitted_peak_mat, front_mat, trail_mat,
             sig_fitted_peak_mat,
             delta_peak_mat,delta_fitted_peak_mat,
             delta_d_peak_mat,delta_d_fitted_peak_mat,delta_d_front_mat,delta_d_trail_mat,
-            t_sunpy_sec, max_nr_peaks_vec, max_nr_peaks_const, parameter_dict)
+            max_nr_peaks_vec, max_nr_peaks_const, parameter_dict)
 
 
-def wave_tracing_algorithm(d_wave_mat,
-                           d_wave_std_mat,
+def wave_tracing_algorithm(d_fitted_peak_mat,
+                           delta_d_fitted_peak_mat,
+                           d_front_mat,
+                           delta_d_front_mat,
                            t_sunpy_sec,
                            max_nr_peaks_vec,
                            peak_tracked=True,
@@ -1157,8 +1251,6 @@ def wave_tracing_algorithm(d_wave_mat,
                            v_max_step=2000,
                            min_points_in_wave='default',
                            fit_second_feature=False,
-                           d_feature2_mat=[],
-                           d_feature2_std_mat=[],
                            parameter_dict={}):
     ''' Traces the waves in the output of the peak_finding_algorithm. Can in principle work with any feature (peak,
     front edge, or custom combination of both). A linear fit is applied to all waves detected. The function allows
@@ -1188,7 +1280,25 @@ def wave_tracing_algorithm(d_wave_mat,
                                                  in the d_wave_mat, 0 at every position without a wave association [theta,time,peak_index]
         parameter_dict:      dict, filled with the parameters, in and output of SOLERwave functions
     '''
+    ########################################################
+    # Addition 27.02.2026: Handles Front and Peak Tracking internally
     ################################################################################
+    if peak_tracked:
+        d_wave_mat = d_fitted_peak_mat
+        d_wave_std_mat = delta_d_fitted_peak_mat
+
+        d_feature2_mat = d_front_mat
+        d_feature2_std_mat = delta_d_front_mat
+    else:
+        d_wave_mat = d_front_mat
+        d_wave_std_mat = delta_d_front_mat
+
+        d_feature2_mat = d_fitted_peak_mat
+        d_feature2_std_mat = delta_d_fitted_peak_mat
+    #######################################
+
+
+
     v_min = v_min_step / 1e3  #converts form km/s to Mm/s
     v_max = v_max_step / 1e3  #converts form km/s to Mm/s
 
@@ -1211,7 +1321,6 @@ def wave_tracing_algorithm(d_wave_mat,
 
     # Set the minimum peaks per wave to either 4 (default) or 3 in the case of low cadence data
     # Warns the user if they choose to set the min_points_in_waves themselves
-    # Todo: Implement with warning module
     #
     if (min_points_in_wave == 'default') and (np.mean(t_diff_sec) >= 60):
         min_points_in_wave = 3
@@ -1319,11 +1428,19 @@ def wave_tracing_algorithm(d_wave_mat,
                 time_vec = t_wave_mat.flatten()[ind_vec]
                 std_vec = (d_wave_std_mat[0,j, :, :].flatten()[ind_vec] + d_wave_std_mat[1,j, :, :].flatten()[ind_vec])/2
 
+                # Excluding nan values as there can be a detected peak but not a detected front
+                not_nan = (np.isnan(wave_p_vec)) | (np.isnan(std_vec))
+
+                t_sunpy_sec_1 = t_sunpy_sec[time_vec][~not_nan]
+                wave_p_vec = wave_p_vec[~not_nan]
+                std_vec = std_vec[~not_nan]
+
                 weight_vec = 1/(std_vec)
 
                 try_fitting_prim_feature = False
                 try:
-                    a, fit_cov = np.polyfit(t_sunpy_sec[time_vec], wave_p_vec, 1,
+
+                    a, fit_cov = np.polyfit(t_sunpy_sec_1, wave_p_vec, 1,
                                             w=weight_vec,
                                             cov=True)#'unscaled')#
 
@@ -1347,14 +1464,18 @@ def wave_tracing_algorithm(d_wave_mat,
                     std_2_vec = (d_feature2_std_mat[0,j, :, :].flatten()[ind_vec]+d_feature2_std_mat[1,j, :, :].flatten()[ind_vec])
 
                     #Excluding nan values as there can be a detected peak but not a detected front
-                    t_sunpy_sec_2 = t_sunpy_sec[time_vec][~np.isnan(wave_p2_vec)]
-                    wave_p2_vec = wave_p2_vec[~np.isnan(wave_p2_vec)]
-                    std_2_vec = std_2_vec[~np.isnan(std_2_vec)]
+                    # Also excludes any values excluded in the main fitted feature
+                    not_nan2 = (np.isnan(wave_p2_vec) | np.isnan( std_2_vec)) | not_nan
+
+                    t_sunpy_sec_2 = t_sunpy_sec[time_vec][~not_nan2]
+                    wave_p2_vec = wave_p2_vec[~not_nan2]
+                    std_2_vec = std_2_vec[~not_nan2]
 
 
                     weight_vec2 = 1/(std_2_vec)
 
                     try:
+
                         a, fit_cov = np.polyfit(t_sunpy_sec_2, wave_p2_vec, 1,
                                                 w=weight_vec2,
                                                 cov=True)#'unscaled')#
@@ -1388,80 +1509,3 @@ def wave_tracing_algorithm(d_wave_mat,
 
     return wave_value_dict, parameter_dict
 
-################################################################################
-#
-# End Fitting Algorithms (06.12.2024)
-#
-################################################################################
-
-# Function added in 11.07.2025 to allow multisegmenting
-
-# ????
-# TODO: Redundant with "find_coord_from_angles(coord_of_flare, theta_mat, arc_angles_mat):"
-#       To be replaced by it.
-#       Also, this name is misleading as not the pixel is found
-
-def find_pixel_from_angles(coord_of_flare,theta_mat,arc_angles_mat):
-    '''
-
-    :param coord_of_flare:  Skycoord Object of the Flare origin at the intended height
-    :param theta_mat:       2d np.array; theta values with [theta, aaa]
-    :param arc_angles_mat:  2d np.array; aaa   values with [theta, aaa]
-    :return:
-    '''
-    import astropy.units as u
-    from astropy.coordinates import BaseCoordinateFrame, SkyCoord
-    from sunpy.coordinates import Heliocentric, HeliographicStonyhurst, get_body_heliographic_stonyhurst
-    import numpy as np
-
-    start = coord_of_flare.transform_to(Heliocentric)
-
-    distance_unit = u.m # Define meter as the unite that is used #start.cartesian.xyz.unit
-
-    center = SkyCoord(0 * distance_unit,
-                      0 * distance_unit,
-                      0 * distance_unit,
-                      obstime=start.obstime,
-                      observer=start.observer,
-                      frame=Heliocentric)
-
-    start_cartesian = start.cartesian.xyz.to(distance_unit).value
-    #end_cartesian = end.cartesian.xyz.to(start.distance_unit).value
-    center_cartesian = center.cartesian.xyz.to(distance_unit).value
-
-    v1 = start_cartesian - center_cartesian
-    r_sun = np.linalg.norm(v1)  #ToDO !!! Is that a sufficient approximation?
-
-    # Defines the second Vector to point to the north pole
-    # Form Heliocentric coordinates:
-    # The Y-axis is aligned with the component of the vector to the Sun’s north pole that is perpendicular to the Z-axis.
-    v2 = np.array([0,r_sun,0])
-
-    # Initial v3 vektor pointing north and perpendicular to v1
-    v3 = np.cross(np.cross(v1, v2), v1)
-    v3 = r_sun * v3 / np.linalg.norm(v3)
-
-    #https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula
-
-    # Temporary Vector needed for the rotating vector
-    v4 = np.cross(v1,v3)/r_sun
-
-    # Using einsum to creat the matrices
-    # Note on the notation: the number of the first letter indicates the dimensions
-
-    vvv1 = np.einsum('i,jk -> ijk', v1, np.ones_like(theta_mat))
-    vvv3 = np.einsum('i,jk -> ijk', v3, np.ones_like(theta_mat))
-    vvv4 = np.einsum('i,jk -> ijk', v4, np.ones_like(theta_mat))
-    tttheta = np.einsum('i,jk -> ijk',  np.ones_like(v3),theta_mat)
-    aaarcangles = np.einsum('i,jk -> ijk',  np.ones_like(v3), arc_angles_mat)
-
-    vvv_rot = vvv3*np.cos(tttheta) + vvv4 * np.sin(tttheta) #+ v1*np.dot(v1,v3) / r_sun**2 * (1-np.cos(theta)) #The last part is redundant as <v1|v3> = 0
-
-    gggreat_arc_points_carthesian = vvv1 *np.cos(aaarcangles) + vvv_rot * np.sin(aaarcangles)
-
-    mask = gggreat_arc_points_carthesian[2,:,:] < 0
-    gggreat_arc_points_carthesian[0,mask] = np.nan
-    gggreat_arc_points_carthesian[1, mask] = np.nan
-    gggreat_arc_points_carthesian[2, mask] = np.nan
-
-    return gggreat_arc_points_carthesian

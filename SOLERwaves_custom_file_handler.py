@@ -90,11 +90,11 @@ def create_preprocessed_input(path_LVL_0,fits_path,base_image_name,end_image_nam
     file_names = all_file_names[start_index:end_index]
 
     match Instrument_Name.lower():
-        case 'gong': #TODO can currently not be reached (But apparently it still works ?)
+        case 'gong':
             data, header = fits.getdata(file_paths[0], header=True)
             # fix header
-            header['cunit1'] = 'arcsec'
-            header['cunit2'] = 'arcsec'
+            #header['cunit1'] = 'arcsec'
+            #header['cunit2'] = 'arcsec'
             header['cdelt1'] = header['SOLAR-R'] / header['Radius']
             header['cdelt2'] = header['cdelt1']
 
@@ -128,13 +128,39 @@ def create_preprocessed_input(path_LVL_0,fits_path,base_image_name,end_image_nam
             header["EXTEND"] = True
 
             m_reference = sunpy.map.Map(data, header)
+
+        case 'aia':
+            from aiapy.calibrate import register, update_pointing
+            from aiapy.calibrate.utils import get_pointing_table
+
+            m = sunpy.map.Map(file_paths[0])
+
+            # update pointing and register (resample to common plate scale & align centers)
+            pointing_table = get_pointing_table("LMSAL", time_range=(m.date - 12 * u.h, m.date + 12 * u.h))
+            m_updated_pointing = update_pointing(m, pointing_table=pointing_table)
+
+            m_reference= register(m_updated_pointing)
         case _:
             m_reference = sunpy.map.Map(file_paths[0])
 
+    # ha2 and gong are already exposure time corrected
+    if Instrument_Name.lower() in ['gong','ha2']:
+        min_exposure_time = None
+        now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
+        print(now + f' custom_sunpy_file_handler: '+ Instrument_Name.lower() +' is already exposure time corrected, min_exposure_time was set to NONE')
+
     # Checks if there is a minimum exposure time required
-    if min_exposure_time is not None:
+    # SDO/EUI DATA is downloaded as LV2 Data, which is already exposure time corrected
+    if (min_exposure_time is not None) and (Instrument_Name.lower() is not 'eui'):
         assert m_reference.exposure_time.to_value('s') > min_exposure_time, "The reference image exposure time is below the min_exposure_time argument"
         m_reference = m_reference / m_reference.exposure_time
+
+    #Rotate the reference map to north == up
+    # uses missing = 0 as gong maps have np.nan for these values, causing problems
+    if Instrument_Name.lower() == 'gong':
+        m_reference = m_reference.rotate(order=3, missing=0)
+    else:
+        m_reference = m_reference.rotate(order=3)
 
     out_wcs = m_reference.wcs
 
@@ -149,9 +175,8 @@ def create_preprocessed_input(path_LVL_0,fits_path,base_image_name,end_image_nam
     m_reference.save(path_LVL_1_1_ref, overwrite=True)
 
     m_base_data = np.array(m_reference.quantity, dtype=np.float64)
-    # set to a large value to avoid division by 0.
-    # Rational: Pixels with a base image value of 0 should be ignored, but setting them to nan interfears with the median
-    m_base_data[m_base_data == 0] = 100000
+    # Set to np.nan, as nan values are ignored in the find mean/median from segment functions
+    m_base_data[m_base_data == 0] = np.nan
 
     for i in range(len(file_paths)-1):
         now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
@@ -159,6 +184,10 @@ def create_preprocessed_input(path_LVL_0,fits_path,base_image_name,end_image_nam
 
         match Instrument_Name.lower():
             case 'gong': #'bigbear','cerrotololo','elteideo','learmonth','maunaloa','Udaipur'
+                # Gong Key Words
+                # https://docs.sunpy.org/en/latest/generated/api/sunpy.map.sources.GONGHalphaMap.html
+                # https://gong.nso.edu/data/HEADER_KEY.html
+
                 data, header = fits.getdata(file_paths[i+1], header=True)
                 # fix header
                 header['cunit1'] = 'arcsec'
@@ -195,10 +224,20 @@ def create_preprocessed_input(path_LVL_0,fits_path,base_image_name,end_image_nam
                 header["EXTEND"] = True
 
                 m_temp = sunpy.map.Map(data, header)
+            case 'aia':
+
+                m= sunpy.map.Map(file_paths[i+1])
+
+                # update pointing and register (resample to common plate scale & align centers)
+
+                # Pointing table does not need to be fetched again, as all wave observations are smaller than 24 hours
+                # #pointing_table = get_pointing_table("LMSAL", time_range=(m.date - 12 * u.h, m.date + 12 * u.h))
+
+                m_updated_pointing = update_pointing(m, pointing_table=pointing_table)
+                m_temp = register(m_updated_pointing)
             case _:
                 m_temp= sunpy.map.Map(file_paths[i+1])
 
-        m_temp_exp_time = m_temp.exposure_time.to_value('s')
         # Checks if there is a minimum exposure time required
         if min_exposure_time is not None:
             # Check if the exposure time exceeds the minimum requirement value
@@ -208,7 +247,8 @@ def create_preprocessed_input(path_LVL_0,fits_path,base_image_name,end_image_nam
 
         if exp_time_check:
             # Checks if there is a minimum exposure time required
-            if min_exposure_time is not None:
+            # SDO/EUI DATA is downloaded as LV2 Data, which is already exposure time corrected
+            if (min_exposure_time is not None) and (Instrument_Name.lower() is not 'eui'):
                 m_temp = m_temp/m_temp.exposure_time
 
             # Differentialy rotate the images
@@ -216,7 +256,11 @@ def create_preprocessed_input(path_LVL_0,fits_path,base_image_name,end_image_nam
             with propagate_with_solar_surface(), SphericalScreen(m_temp.observer_coordinate, only_off_disk=True):
                 m_temp2 = m_temp.reproject_to(out_wcs)
 
-
+            # Rotate north up
+            #rotation_from_north = m_temp2.fits_header['CROTA2']
+            #t1 = tm.time()
+            m_temp2 = m_temp2.rotate(order=3)
+            #print(f'rotation time: {tm.time() - t1}')
             #########################################################
             # Base Ratio
             ########################################################
@@ -247,6 +291,14 @@ def create_preprocessed_input(path_LVL_0,fits_path,base_image_name,end_image_nam
 
             # Adding a new fits keyword
             # https://stackoverflow.com/questions/57611913/how-to-save-and-add-new-fits-header-in-fits-file
+            if Instrument_Name.lower() == 'gong':
+                # Gong observation do not provide an exposure time, but are in the view milli second range
+                # https://docs.sunpy.org/en/latest/generated/api/sunpy.map.sources.GONGHalphaMap.html
+                # https://gong.nso.edu/data/HEADER_KEY.html
+                m_temp_exp_time = 0
+            else:
+                m_temp_exp_time = m_temp.exposure_time.to_value('s')
+
             with fits.open(path_LVL_1_1_derot, mode='update') as hdul:
                 hdr = hdul[0].header
                 hdr['T_ROT'] = (m_temp.fits_header['date-obs'])
@@ -278,7 +330,7 @@ def search_new_event(path,start_time, end_time,Instrument_Name,Wavelength_,custo
         exp_time = res_initial[0,:]['EXPTIME']
 
         # The first image with sufficiently long exposure time is taken as reference
-        reference_image = res_initial[:,exp_time > min_exposure_time][0] #TODO: !!!! USE AIA - Py to directly sort for exposurese with sufficient length
+        reference_image = res_initial[:,exp_time > min_exposure_time][0]
 
         # Base time
         base_time = reference_image['T_REC'][0][:-1]
@@ -313,6 +365,31 @@ def search_new_event(path,start_time, end_time,Instrument_Name,Wavelength_,custo
 
         # Instrument plus wavelenght in on string
         instrument_wavelength = Instrument_Name.upper() + '_%.f' % Wavelength_.value + 'AA'
+    elif Instrument_Name.lower() == 'eui':
+        if Wavelength_.to_value('angstrom') == 174:
+            product_eui = "EUI-FSI174-IMAGE"
+        elif Wavelength_.to_value('angstrom') == 304:
+            product_eui = "EUI-FSI304-IMAGE"
+
+        res = Fido.search(a.Time(start_time, end_time), a.Instrument(Instrument_Name.upper()),a.Level(2),a.soar.Product(product_eui))
+
+        start_time = res[0, :]['Start time']
+        end_time = res[0, :]['End time']
+
+        # Calculate Exposure time
+        dt_sec = (np.array(end_time, dtype='datetime64') - np.array(start_time, dtype='datetime64')).astype('timedelta64[s]').astype('float64')
+
+        # The first image with sufficiently long exposure time is taken as reference
+        reference_image = res[:, dt_sec > min_exposure_time][0,0]
+
+        # Creates the correct base time string from the start date
+        # Add in the "T" as per convention
+        base_time = str(reference_image['Start time'])[:10]+'T'+str(reference_image['Start time'])[11:19]
+
+
+
+        # Instrument plus wavelenght in on string
+        instrument_wavelength = Instrument_Name.upper() + '_%.f' % Wavelength_.value + 'AA'
 
     # H alpha observations:
     if (Wavelength_.to_value('AA') >= 6562 ) and (Wavelength_.to_value('AA') <= 6563):
@@ -320,7 +397,6 @@ def search_new_event(path,start_time, end_time,Instrument_Name,Wavelength_,custo
         # Gong is the source, not the instrument. The tool will accept it as instrument name if the wavelength
         # corresponds to h_alpha
         if (Instrument_Name.lower() == 'gong'):
-            min_exposure_time = None
 
             res = Fido.search(a.Time(start_time, end_time), a.Wavelength(6562.8 * u.AA),a.Source('gong'))
 
@@ -354,46 +430,47 @@ def search_new_event(path,start_time, end_time,Instrument_Name,Wavelength_,custo
 
             # Gong individual Observatories:
         elif (Instrument_Name.lower() == 'bigbear') or (Instrument_Name.lower() == 'big bear'):
-            min_exposure_time = None
             res = Fido.search(a.Time(start_time, end_time), a.Instrument('Big bear'),a.Wavelength(6562.8 * u.AA))
             base_time = str(res[0, 0]['Start Time'].to_value('datetime64'))[:19]
             instrument_wavelength = 'GONG_H_alpha_BigBear'
+            Instrument_Name = 'gong'
 
         elif (Instrument_Name.lower() == 'cerrotololo') or (Instrument_Name.lower() == 'cerro tololo'):
-            min_exposure_time = None
             res = Fido.search(a.Time(start_time, end_time), a.Instrument('Cerro Tololo'),a.Wavelength(6562.8 * u.AA))
             base_time = str(res[0, 0]['Start Time'].to_value('datetime64'))[:19]
             instrument_wavelength = 'GONG_H_alpha_CerroTololo'
+            Instrument_Name = 'gong'
 
         elif (Instrument_Name.lower() == 'elteideo') or (Instrument_Name.lower() == 'el teide'):
-            min_exposure_time = None
             res = Fido.search(a.Time(start_time, end_time), a.Instrument('El Teide'), a.Wavelength(6562.8 * u.AA))
             base_time = str(res[0, 0]['Start Time'].to_value('datetime64'))[:19]
             instrument_wavelength = 'GONG_H_alpha_ElTeide'
+            Instrument_Name = 'gong'
 
         elif (Instrument_Name.lower() == 'learmonth'):
-            min_exposure_time = None
             res = Fido.search(a.Time(start_time, end_time), a.Instrument('Learmonth'),a.Wavelength(6562.8 * u.AA))
             base_time = str(res[0, 0]['Start Time'].to_value('datetime64'))[:19]
             instrument_wavelength = 'GONG_H_alpha_Learmonth'
+            Instrument_Name = 'gong'
 
         elif (Instrument_Name.lower() == 'maunaloa') or (Instrument_Name.lower() == 'mauna loa'):
-            min_exposure_time = None
             res = Fido.search(a.Time(start_time, end_time), a.Instrument('Mauna Loa'),a.Wavelength(6562.8 * u.AA))
             base_time = str(res[0, 0]['Start Time'].to_value('datetime64'))[:19]
             instrument_wavelength = 'GONG_H_alpha_MaunaLoa'
+            Instrument_Name = 'gong'
 
         elif (Instrument_Name.lower() == 'udaipur'):
-            min_exposure_time = None
             res = Fido.search(a.Time(start_time, end_time), a.Instrument('Udaipur'),a.Wavelength(6562.8 * u.AA))
             base_time = str(res[0, 0]['Start Time'].to_value('datetime64'))[:19]
             instrument_wavelength = 'GONG_H_alpha_Udaipur'
+            Instrument_Name = 'gong'
 
         # Kanzelhöhe H_alpha
         elif (Instrument_Name.lower() == 'ha2'):
-            min_exposure_time = None
-            res = Fido.search(a.Time(start_time, end_time), a.Instrument('ha2'), a.Wavelength(6562.8 * u.AA))
+            # For whatever reason, it is important to have a.Wavelength first, and a.Instrument second
+            res = Fido.search(a.Time(start_time, end_time), a.Wavelength(6562.8 * u.AA), a.Instrument('HA2'))
             instrument_wavelength ='Kanzelhoehe_H_alpha'
+            base_time = str(res[0, 0]['Start Time'].to_value('datetime64'))[:19]
 
     # Create the folder Structure for the observation
     path_LVL_0 = create_folder_structure(path,base_time,instrument_wavelength,tool_name = 'SOLERwave')
@@ -428,17 +505,35 @@ def search_new_event(path,start_time, end_time,Instrument_Name,Wavelength_,custo
 #
 ############################################################################################################
 
-def create_folder_structure_result(path, LVL_0_directory, wave_origin_coordinates, direction, width,result_folder_app = ''):
+def create_folder_structure_result(path,
+                                   LVL_0_directory,
+                                   wave_origin_coordinates,
+                                   theta_range = None,
+                                   j = 0,
+                                   multi_sector = False,
+                                   result_folder_app = ''):
     """Creates folder structure for a single wave analysis
 
     :param path: string, path where LVL_0_directory is found
     :param LVL_0_directory: string, name of LVL_0_directory
     :param wave_origin_coordinates: Skycord object with the coordinates of presumed wave origen
-    :param direction: float, direction of wave in degree
-    :param width: float, width of wave in degree
+    :param multi_sector: boolian, switches the result folder creation to multi-sector
     :param result_folder_app: string, appendix to the name of folder where results will be stored
     :return: file_path_dict: dictionary used as default input for the SOLWERwave plotting functions
     """
+
+    if not(theta_range is None):
+        if theta_range[j] < theta_range[j + 1]:
+            direction = ((theta_range[j] + theta_range[j + 1]) / 2 * 180 / np.pi) % 360
+            width = ((theta_range[j + 1] - theta_range[j]) * 180 / np.pi) % 360
+        elif theta_range[j] > theta_range[j + 1]:
+            direction = (180 - (theta_range[j] + theta_range[j + 1]) / 2 * 180 / np.pi) % 360
+            width = (360 - (theta_range[j] - theta_range[j + 1]) * 180 / np.pi) % 360
+
+    # Labels for the plots
+    str_direct_width = ' Dir.: %.1f°, Width: %.1f°' % (direction, width)
+
+
 
     path_LVL_0 = os.path.join(path, LVL_0_directory)
     os.makedirs(path_LVL_0,exist_ok=True) #Creates new Main directory if not allready defined
@@ -451,8 +546,12 @@ def create_folder_structure_result(path, LVL_0_directory, wave_origin_coordinate
 
     shortend_LVL0 = ''.join(LVL_0_directory.split('_')[1:])
 
-    result_directory = (shortend_LVL0 + '_Lon%.0f' % (wave_origin_coordinates.Tx.to_value()) + '_Lat%.0f' % (
-        wave_origin_coordinates.Ty.to_value()) + 'Dir%.0f' % (direction) + 'W%.0f' % (width)+result_folder_app)
+    if multi_sector:
+        result_directory = (shortend_LVL0 + '_Lon%.0f' % (wave_origin_coordinates.Tx.to_value()) + '_Lat%.0f' % (
+            wave_origin_coordinates.Ty.to_value()) + '_Multi_Sec%.0f' % (direction-width/2) + 'to%.0f' % (direction+width/2)+result_folder_app)
+    else:
+        result_directory = (shortend_LVL0 + '_Lon%.0f' % (wave_origin_coordinates.Tx.to_value()) + '_Lat%.0f' % (
+            wave_origin_coordinates.Ty.to_value()) + 'Dir%.0f' % (direction) + 'W%.0f' % (width)+result_folder_app)
 
     filename_appendix = result_directory + '_'+ ''.join(LVL_0_directory.split('_')[1:])
     filename_appendix = ''
@@ -477,13 +576,16 @@ def create_folder_structure_result(path, LVL_0_directory, wave_origin_coordinate
     for i in name_list:
         file_path_dict[i] = eval(i)
 
-    return file_path_dict
+    return file_path_dict, str_direct_width
+
+
 
 def load_preprocessed_fits(path,LVL_0_directory, added_ref_height):
     """Loads the preprocessed fits files into different list outputs
 
     :param path: string, path where LVL_0_directory is found
     :param LVL_0_directory: string, name of LVL_0_directory
+    :param added_ref_height: float in astropy distance units, height added to photosphere radius
     :return:
         map_data_list, list with all image data as 2d numpy arrays
         m_reference, sunpy.map.Map object, reference image
@@ -493,6 +595,16 @@ def load_preprocessed_fits(path,LVL_0_directory, added_ref_height):
     import glob
     import os
     from astropy.io import fits
+
+
+
+    # Checks if the added_ref_height feature is used
+    if added_ref_height.to_value('m') > 1:
+        now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
+        print(now + ' load_preprocessed_fits: WARNING: added_ref_height is currently an unsupported feature,'
+                    ' and set to 0*u.m internally')
+    # Sets added ref height to 0*u.m as it is an untested feature, and therefore currently not supported
+    added_ref_height = 0*u.m
 
     path_LVL_0 = os.path.join(path, LVL_0_directory)
     os.makedirs(path_LVL_0, exist_ok=True)
@@ -538,26 +650,68 @@ def load_preprocessed_fits(path,LVL_0_directory, added_ref_height):
     hdr = fits.open(ref_file[0])
     header = hdr[0].header
     data = hdr[0].data
-    r_sun_ref = header['RSUN_Ref']*u.m + added_ref_height
+    if "rsun_ref" in str(hdr[0].header).lower():
+        r_sun_ref = header['RSUN_Ref']*u.m + added_ref_height
+    else:
+        r_sun_ref = 695.7 *1e6* u.m + added_ref_height
+        header.set('RSUN_REF', r_sun_ref.to_value('m'))
+
+        now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
+        print(now + ' load_preprocessed_fits: Warning: fits include not RSUN_Ref, 695.7 Mm is used')
+
+    # As added ref height is an untested feature, it is currently not supported
     if added_ref_height.to_value('m') > 1: #Small value not equal to 0
     # Set the observed radius to the height investigated
-        header.set('RSUN_OBS', header['RSUN_OBS']*r_sun_ref.to_value('m')/header['RSUN_Ref']) #Todo: Is not linear, but works for low heights
+        # Todo: Test which Keywords are necessary to work with an increased diameter sun
+        header.set('RSUN_OBS', header['RSUN_OBS']*r_sun_ref.to_value('m')/header['RSUN_Ref'])
         header.set('R_SUN', header['R_SUN'] * r_sun_ref.to_value('m') / header['RSUN_Ref'])
         # Set the Reference for calculations to the height investigated
         header.set('RSUN_REF', r_sun_ref.to_value('m'))
     m_ref_height = sunpy.map.Map(data, header)
 
+    # Extract the radius of the sun in pixels from the fits parameters
+    if m_ref_height.fits_header.get('TELESCOP') == 'SDO/AIA':
+        r_sun_pixel = m_ref_height.fits_header.get('R_SUN') / (4096 / m_ref_height.data.shape[0])
+    elif m_ref_height.fits_header.get('TELESCOP') == 'STEREO':
+        # !! RSUN is the Radius of sun (Arcseconds) [https://soho.nascom.nasa.gov/solarsoft/stereo/secchi/doc/FITS_keywords.pdf]
+        # Therefore, the pixel radius has to be calculated
+        r_sun_pixel = (m_ref_height.fits_header.get('RSUN') / m_ref_height.fits_header.get('CDELT1')
+                       / (2048 / m_ref_height.data.shape[0]))
+    elif m_ref_height.fits_header.get('TELESCOP') == 'SOLO/EUI/FSI':
+        # !! RSUN_OBS is the Radius of sun (Arcseconds) [https://www.cosmos.esa.int/documents/3689933/11862470/SP_ROB_SOEUI_19002_MetadataStandard_1.8.pdf/c22dad25-f3dc-c528-d648-83b264689615?t=1682006977517]
+        # Therefore, the pixel radius has to be calculated
+        r_sun_pixel = (m_ref_height.fits_header.get('RSUN_OBS') / m_ref_height.fits_header.get('CDELT1')
+                       / (3734 / m_ref_height.data.shape[0]))
+    elif m_ref_height.fits_header.get('TELESCOP') == 'KHPI':
+        r_sun_pixel = (m_ref_height.fits_header.get('SOLAR_R')/ (2048 / m_ref_height.data.shape[0]))
+    elif m_ref_height.fits_header.get('TELESCOP') == 'NSO-GONG':
+        # SOLAR-R : https://nso.edu/telescopes/glossary-of-solis-fdp-fits-header-keywords/
+        r_sun_pixel = (m_ref_height.fits_header.get('RADIUS '))/ (2048 / m_ref_height.data.shape[0])
+    else:
+        # TODO: Implement for other insturments, #Corrects for Binning, but should be correct in R_sun already
+        raise Exception('Instrument is not jet implemented in the uncertainty calculations of find_segment_from_list_staggered')
+
     now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
     print(now + ' load_preprocessed_fits: files loaded')
 
-    return map_data_list, m_reference,m_ref_height,r_sun_ref, time,t_exposure, sunpy_seq
+    from sunpy.time import parse_time
+    time_sunpyobj = parse_time(time)
+    # Time vector used for fitting operations to avoid unnecessary large numbers
+    t_sunpy_sec = (time_sunpyobj - time_sunpyobj[0]).to_value('sec')
+
+    return map_data_list, m_reference,m_ref_height,r_sun_ref,r_sun_pixel, time,t_sunpy_sec,t_exposure, sunpy_seq
 
 
-def load_unprocessed_fits(path,LVL_0_directory,time_of_prozessed,m_ref):
+def load_unprocessed_fits(path,
+                          LVL_0_directory,
+                          time_of_processed,
+                          m_ref):
     """Loads the preprocessed fits files into different list outputs
 
-    :param path: string, path where LVL_0_directory is found
+    :param path:            string, path where LVL_0_directory is found
     :param LVL_0_directory: string, name of LVL_0_directory
+    :param time_of_processed: list, time_stamps of processed maps loaded
+    :param m_ref:             sunpy map object with reference wcs frame
     :return:
         map_data_list, list with all image data as 2d numpy arrays
         m_reference, sunpy.map.Map object, reference image
@@ -571,6 +725,17 @@ def load_unprocessed_fits(path,LVL_0_directory,time_of_prozessed,m_ref):
     #from sunpy.coordinates import Heliocentric, BaseHeliographic, propagate_with_solar_surface
     #out_wcs = m_ref.wcs
 
+    try:
+        telescope = m_ref.fits_header['TELESCOP']
+    except:
+        telescope = m_ref.fits_header['OBSRVTRY']
+
+    if telescope == 'KHPI':
+        # Added functions necessary to add fits keywords needed for plotting
+        from astropy.io import fits
+        from sunpy.coordinates.ephemeris import get_body_heliographic_stonyhurst
+
+
 
     path_LVL_0 = os.path.join(path, LVL_0_directory)
     os.makedirs(path_LVL_0, exist_ok=True)
@@ -579,21 +744,51 @@ def load_unprocessed_fits(path,LVL_0_directory,time_of_prozessed,m_ref):
 
 
     #files_paths = sorted(glob.glob( '*derot_bin_base.fits',root_dir=path_LVL_0_Preprocessed))
-    files_paths = sorted(glob.glob(path_LVL_0_Unprocessed+'/*.fits'))
+    files_paths = sorted(glob.glob(path_LVL_0_Unprocessed+'/*'))
 
     time_ref = m_ref.fits_header['date-obs']
 
-    map_data_list_unprocessed = [[] for _ in range(len(time_of_prozessed))]
-    time_unprocessed = [[] for _ in range(len(time_of_prozessed))]
-    sunpy_seq_unprocessed = [[] for _ in range(len(time_of_prozessed))]
-    exptime_unprocessed = [[] for _ in range(len(time_of_prozessed))]
+    map_data_list_unprocessed = [[] for _ in range(len(time_of_processed))]
+    time_unprocessed = [[] for _ in range(len(time_of_processed))]
+    sunpy_seq_unprocessed = [[] for _ in range(len(time_of_processed))]
+    exptime_unprocessed = [[] for _ in range(len(time_of_processed))]
 
 
     for file_path in files_paths:
-        map_temp = sunpy.map.Map(file_path)
+
+        if telescope == 'KHPI':
+            data, header = fits.getdata(file_path, header=True)
+
+            earth = get_body_heliographic_stonyhurst('earth', header['DATE-OBS'])
+
+            header['dsun_obs'] = earth.radius.to_value('m')
+            header['hgln_obs'] = earth.lon.to_value('degree')
+            header['hglt_obs'] = earth.lat.to_value('degree')
+
+            # Define the rotation angle
+            angle_rad = np.deg2rad(header["ANGLE"])
+
+            # Compute the CD matrix values
+            cd1_1 = np.cos(angle_rad) * header["CDELT1"]
+            cd1_2 = np.sin(angle_rad) * header["CDELT1"]
+            cd2_1 = -np.sin(angle_rad) * header["CDELT2"]
+            cd2_2 = np.cos(angle_rad) * header["CDELT2"]
+
+            # Update header for SunPy compatibility
+            header["CTYPE1"] = "HPLN-TAN"
+            header["CTYPE2"] = "HPLT-TAN"
+            header["CD1_1"] = cd1_1
+            header["CD1_2"] = cd1_2
+            header["CD2_1"] = cd2_1
+            header["CD2_2"] = cd2_2
+            header["EXTEND"] = True
+            map_temp = sunpy.map.Map(data, header)
+        else:
+            map_temp = sunpy.map.Map(file_path)
+
         time_point = map_temp.fits_header['date-obs']
 
-        for index,time_to_compare in enumerate(time_of_prozessed):
+        for index,time_to_compare in enumerate(time_of_processed):
             if time_point == time_to_compare:
 
                 #map_data = map_temp.data.astype('float64')  # Float64 is required as NJIT cannot read <8f format.
@@ -609,7 +804,12 @@ def load_unprocessed_fits(path,LVL_0_directory,time_of_prozessed,m_ref):
                 map_data_list_unprocessed[index] = map_temp2.data.astype('float64')
                 time_unprocessed[index] = map_temp2.fits_header['date-obs']
                 sunpy_seq_unprocessed[index] = map_temp2
-                exptime_unprocessed[index] = map_temp.exposure_time.to_value('s')
+
+                if telescope == 'NSO-GONG':
+                    exptime_unprocessed[index] = 0
+                else:
+                    exptime_unprocessed[index] = map_temp.exposure_time.to_value('s')
+
             elif time_point == time_ref:
                 m_ref_unprocessed = map_temp
 
@@ -628,7 +828,10 @@ def load_unprocessed_fits(path,LVL_0_directory,time_of_prozessed,m_ref):
 ###############################################################################
 
 def create_numerical_output(j,
-                            intensity_mean_staggered, intensity_var_staggered, distance_staggered,
+                            intensity_mean_staggered,
+                            intensity_median_staggered,
+                            intensity_var_staggered,
+                            distance_staggered,
                             d_peak_mat, d_front_mat, d_trail_mat, peak_mat, front_mat, trail_mat,delta_peak_mat,time,
                             instr_dir_width_title_string,
                             wave_value_dict, file_path_dict=[], save_path=[], filename_appendix=[]):
@@ -651,7 +854,7 @@ def create_numerical_output(j,
         now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
         print(
             now + ' create_numerical_output : Warning: both a file_path_dict and a save_path and/or name appendix where given. '
-                  'Only the file_path_dict was used')  # TODO: might ues an actual waring package
+                  'Only the file_path_dict was used')
 
     if len(file_path_dict) != 0:
         save_path = file_path_dict['path_LVL_0_Results_0_Output']
@@ -666,13 +869,19 @@ def create_numerical_output(j,
     #########################################################################
     distance_Mm = np.round(distance_staggered.to_value('Mm'),decimals_distance)
     intensity_mean = np.concatenate((np.array([distance_Mm]).T,np.round(intensity_mean_staggered[:,j,:],decimals_amplitude)),axis = 1)
+    intensity_median = np.concatenate((np.array([distance_Mm]).T,np.round(intensity_median_staggered[:,j,:],decimals_amplitude)),axis = 1)
     intensity_std = np.concatenate((np.array([distance_Mm]).T,np.round(np.sqrt(intensity_var_staggered[:,j,:]),decimals_amplitude)),axis = 1)
 
     int_mean_dict_path = os.path.join(save_path, 'perturbation_profile' + filename_appendix + '.csv')
     np.savetxt(int_mean_dict_path, intensity_mean, header='distance in Mm, '+','.join(time),delimiter=',',fmt='%.3f')
 
-    int_mean_dict_path = os.path.join(save_path, 'perturbation_profile_std' + filename_appendix + '.csv')
-    np.savetxt(int_mean_dict_path, intensity_std, header='distance in Mm, '+', '.join(time),delimiter=',',fmt='%.3f')
+    int_median_dict_path = os.path.join(save_path, 'perturbation_profile_std' + filename_appendix + '.csv')
+    np.savetxt(int_median_dict_path, intensity_median, header='distance in Mm, '+', '.join(time),delimiter=',',fmt='%.3f')
+
+    int_std_dict_path = os.path.join(save_path, 'perturbation_profile_std' + filename_appendix + '.csv')
+    np.savetxt(int_std_dict_path, intensity_std, header='distance in Mm, '+', '.join(time),delimiter=',',fmt='%.3f')
+
+
 
     # Loading options
     # intensity_mean = np.loadtxt(int_mean_dict_path,delimiter=',')[:,1:]
@@ -732,6 +941,7 @@ def create_numerical_output(j,
     all_wave_values_dict['time'] = time
 
     all_wave_values_dict['intensity_mean'] = intensity_mean_staggered
+    all_wave_values_dict['intensity_median'] = intensity_median_staggered
     all_wave_values_dict['intensity_var'] = intensity_var_staggered
     all_wave_values_dict['distance'] = distance_staggered
     all_wave_values_dict['d_peak_mat'] = d_peak_mat
@@ -773,7 +983,7 @@ def print_parameter_dict(parameter_dict,file_path_dict = [],save_path = [],filen
     if len(file_path_dict) != 0 and ((len(filename_appendix) != 0) or (len(save_path) != 0)):
         now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
         print(now + ' Print Parameter Dict : Warning: both a file_path_dict and a save_path and/or name appendix where given. '
-                    'Only the file_path_dict was used') # TODO: might ues an actual waring package
+                    'Only the file_path_dict was used')
 
     if len(file_path_dict) != 0:
         save_path = file_path_dict['path_LVL_0_Results_0_Diagnostics']
@@ -788,6 +998,9 @@ def print_parameter_dict(parameter_dict,file_path_dict = [],save_path = [],filen
         with open(Parameter_dict_path, 'w') as f:
             for key, value in parameter_dict.items():
                 f.write('%s: %s\n' % (key, value))
+
+        now = tm.strftime("%H:%M:%S", tm.localtime(tm.time()))
+        print(now + ' Print Parameter Dict : Parameter dict created')
 
     return
 
