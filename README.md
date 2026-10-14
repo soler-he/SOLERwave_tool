@@ -38,8 +38,10 @@ It contains multiple examples, you might not want to download and preprocess all
 Currently the following Instruments are supported/ have been tested:
 - SDO/AIA
 - STEREO/SECHII
+- SOLO/EUI/FSI
 - GONG H-alpha (download is observatory specific)
 - Kanzelhoehe H-alpha
+
 
 ## Wave Tracing Tool
 In order to use the tool on the downloaded data, one of the pre-programmed Jupyter notebooks for 
@@ -49,6 +51,10 @@ on the 6th September 2011 by SDO/AIA in 211 Angstrom.
 ## Citation
 
 If you use the tool, please cite "Baumgartner-Steinleitner et al. 2026 "**[ADS](https://ui.adsabs.harvard.edu/abs/2026arXiv260523599B)**, (doi = 10.48550/arXiv.2605.23599) 
+
+Release V1.0 (SOLERwave tool with Single-Sector Analysis) of the tool can be also cited via zenodo: [10.5281/zenodo.20644556](https://doi.org/10.5281/zenodo.20644556) 
+
+**Note that this git repo holds a newer, unreleased version!**
 
 ## Miscellaneous
 This project has received funding from the European Union's Horizon Europe research and innovation program under grant agreement No 101134999.  As part of the grant agreement the tool will be made public.
